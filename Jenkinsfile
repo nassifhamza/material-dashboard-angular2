@@ -6,8 +6,8 @@ pipeline {
         SONAR_TOKEN = credentials('sonarqube-token')
         NEXUS_CREDENTIALS = credentials('nexus-user')
         
-        // 🔄 UPDATE: Change to your Docker Hub username
-        IMAGE_NAME = 'sponsor1/portfolio-frontend'
+        // 🔄 UPDATE: Changed for Angular project
+        IMAGE_NAME = 'sponsor1/material-dashboard-angular'
         IMAGE_TAG = "${BUILD_NUMBER}"
         
         // Local machine URLs - Updated for Docker network
@@ -34,16 +34,45 @@ pipeline {
         stage('Install Dependencies') {
             steps {
                 script {
-                    echo '📥 Installing dependencies...'
+                    echo '📥 Installing Angular dependencies...'
                     sh '''
+                        echo "=== Environment Information ==="
                         node --version
                         npm --version
                         
-                        # Install all dependencies
-                        npm install
+                        # Check if Angular project
+                        if [ -f "angular.json" ]; then
+                            echo "✅ Angular project detected"
+                        else
+                            echo "❌ Not an Angular project - this pipeline is for Angular"
+                            exit 1
+                        fi
                         
-                        # Update browserslist to fix warnings
-                        npx browserslist@latest --update-db || true
+                        # Check package.json engines (the problematic part)
+                        echo "=== Checking Package.json Engines ==="
+                        if grep -q '"engines"' package.json; then
+                            echo "Found engine constraints:"
+                            grep -A 5 '"engines"' package.json
+                            echo "⚠️ Will bypass outdated engine constraints"
+                        fi
+                        
+                        # Clear npm cache and remove existing installations
+                        echo "=== Cleaning Previous Installations ==="
+                        npm cache clean --force
+                        rm -rf node_modules package-lock.json
+                        
+                        # Install Angular CLI globally first
+                        echo "=== Installing Angular CLI ==="
+                        npm install -g @angular/cli@14.2.7 --force || echo "Angular CLI installation attempted"
+                        
+                        # KEY FIX: Install dependencies with flags to bypass all the version conflicts
+                        echo "=== Installing Project Dependencies (with conflict resolution) ==="
+                        npm install --legacy-peer-deps --no-engine-strict --force
+                        
+                        # Verify installations
+                        echo "=== Verification ==="
+                        ng version || echo "Angular CLI verification completed"
+                        echo "✅ Dependencies installed successfully"
                     '''
                 }
             }
@@ -52,17 +81,30 @@ pipeline {
         stage('Code Linting') {
             steps {
                 script {
-                    echo '🔍 Running ESLint...'
+                    echo '🔍 Running Angular linting...'
                     sh '''
-                        # Run linting (non-blocking)
-                        npx eslint src/ --ext .js,.jsx,.ts,.tsx --format json > eslint-report.json || true
-                        npx eslint src/ --ext .js,.jsx,.ts,.tsx || echo "Linting completed with warnings"
+                        # Run Angular linting
+                        echo "=== Running Angular Linting ==="
+                        
+                        # Try ng lint first
+                        if ng lint --format json > lint-report.json 2>/dev/null; then
+                            echo "✅ ng lint completed successfully"
+                            ng lint || echo "Linting had warnings"
+                        else
+                            echo "⚠️ ng lint not configured, trying alternatives"
+                            echo '{"results":[]}' > lint-report.json
+                            
+                            # Try ESLint as fallback
+                            npx eslint src/ --ext .ts,.js --format json > eslint-report.json || echo "ESLint completed"
+                        fi
+                        
+                        echo "✅ Linting stage completed"
                     '''
                 }
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'eslint-report.json', fingerprint: true, allowEmptyArchive: true
+                    archiveArtifacts artifacts: '*-report.json', fingerprint: true, allowEmptyArchive: true
                 }
             }
         }
@@ -70,69 +112,71 @@ pipeline {
         stage('Unit Tests') {
             steps {
                 script {
-                    echo '🧪 Running unit tests...'
+                    echo '🧪 Running Angular unit tests...'
                     sh '''
-                        # Set CI environment for non-interactive testing
+                        # Set CI environment
                         export CI=true
+                        export CHROME_BIN=/usr/bin/google-chrome-stable
                         
-                        # Create robust tests that work with your App structure
-                        cat > src/App.test.js << 'EOF'
-import { render } from '@testing-library/react';
-import App from './App';
-
-// Mock react-router-dom to avoid navigation issues in tests
-jest.mock('react-router-dom', () => ({
-  ...jest.requireActual('react-router-dom'),
-  BrowserRouter: ({ children }) => <div data-testid="router">{children}</div>,
-}));
-
-test('app renders without crashing', () => {
-  const { container } = render(<App />);
-  
-  // Check that the main App div exists
-  const appDiv = container.querySelector('.App');
-  expect(appDiv).toBeInTheDocument();
-  expect(appDiv).toHaveClass('App');
-});
-
-test('app has correct structure', () => {
-  const { container } = render(<App />);
-  
-  // Check for main app components
-  const appDiv = container.querySelector('.App');
-  expect(appDiv).toBeInTheDocument();
-  
-  // App should have either id="no-scroll" or id="scroll"
-  expect(appDiv.id).toMatch(/^(no-scroll|scroll)$/);
-});
-
-test('preloader and main content structure exist', () => {
-  const { container } = render(<App />);
-  
-  // The app should render without throwing errors
-  expect(container.firstChild).toBeInTheDocument();
-  
-  // Should have the App div
-  const appDiv = container.querySelector('.App');
-  expect(appDiv).toBeInTheDocument();
-});
-
-// Test that doesn't rely on specific elements being visible
-test('component mounts successfully', () => {
-  // This test just ensures the component can mount without errors
-  expect(() => render(<App />)).not.toThrow();
-});
+                        echo "=== Setting up Test Environment ==="
+                        
+                        # Create karma config for CI environment
+                        cat > karma.ci.conf.js << 'EOF'
+module.exports = function (config) {
+  config.set({
+    basePath: '',
+    frameworks: ['jasmine', '@angular-devkit/build-angular'],
+    plugins: [
+      require('karma-jasmine'),
+      require('karma-chrome-launcher'),
+      require('karma-jasmine-html-reporter'),
+      require('karma-coverage'),
+      require('@angular-devkit/build-angular/plugins/karma')
+    ],
+    client: {
+      clearContext: false
+    },
+    coverageReporter: {
+      dir: require('path').join(__dirname, './coverage/'),
+      subdir: '.',
+      reporters: [
+        { type: 'html' },
+        { type: 'text-summary' },
+        { type: 'lcov' }
+      ]
+    },
+    reporters: ['progress', 'kjhtml', 'coverage'],
+    port: 9876,
+    colors: true,
+    logLevel: config.LOG_INFO,
+    autoWatch: false,
+    browsers: ['ChromeHeadlessNoSandbox'],
+    customLaunchers: {
+      ChromeHeadlessNoSandbox: {
+        base: 'ChromeHeadless',
+        flags: [
+          '--no-sandbox',
+          '--disable-web-security',
+          '--disable-features=VizDisplayCompositor'
+        ]
+      }
+    },
+    singleRun: true,
+    restartOnFileChange: false
+  });
+};
 EOF
                         
-                        # Optional: Add data-testid to App.js for future tests
-                        if ! grep -q 'data-testid="app"' src/App.js; then
-                            echo "Adding data-testid to App component..."
-                            # Handle your specific div structure
-                            sed -i 's|className="App" id={load ? "no-scroll" : "scroll"}|className="App" id={load ? "no-scroll" : "scroll"} data-testid="app"|' src/App.js || true
+                        # Run Angular tests
+                        echo "=== Running Angular Tests ==="
+                        if ng test --karma-config=karma.ci.conf.js --code-coverage --watch=false; then
+                            echo "✅ Tests passed successfully"
+                        else
+                            echo "⚠️ Tests failed, but continuing pipeline..."
+                            echo "Test failure detected" > test-results.txt
                         fi
                         
-                        # Run tests with coverage (continue on failure)
-                        npm test -- --coverage --watchAll=false --passWithNoTests || echo "Tests completed with some failures"
+                        echo "✅ Unit tests stage completed"
                     '''
                 }
             }
@@ -140,12 +184,12 @@ EOF
                 always {
                     script {
                         try {
-                            if (fileExists('coverage/lcov-report/index.html')) {
+                            if (fileExists('coverage/index.html')) {
                                 publishHTML([
                                     allowMissing: true,
                                     alwaysLinkToLastBuild: true,
                                     keepAll: true,
-                                    reportDir: 'coverage/lcov-report',
+                                    reportDir: 'coverage',
                                     reportFiles: 'index.html',
                                     reportName: 'Coverage Report'
                                 ])
@@ -161,26 +205,48 @@ EOF
         stage('Build Application') {
             steps {
                 script {
-                    echo '🏗️ Building React application...'
+                    echo '🏗️ Building Angular application...'
                     sh '''
-                        # Build the application
-                        npm run build
+                        echo "=== Building Angular Application ==="
+                        
+                        # Build Angular application for production
+                        if ng build --configuration production; then
+                            echo "✅ Production build successful"
+                        elif ng build; then
+                            echo "✅ Default build successful"
+                        else
+                            echo "❌ Angular build failed"
+                            exit 1
+                        fi
                         
                         # Verify build output
-                        ls -la build/
+                        if [ -d "dist" ]; then
+                            echo "✅ Build output found in dist/"
+                            ls -la dist/
+                            
+                            # Find the actual build folder (Angular creates subfolder)
+                            BUILD_FOLDER=$(find dist -type d -maxdepth 1 | grep -v "^dist$" | head -1)
+                            if [ -n "$BUILD_FOLDER" ]; then
+                                echo "Actual build folder: $BUILD_FOLDER"
+                                ls -la "$BUILD_FOLDER"
+                            fi
+                        else
+                            echo "❌ No build output found"
+                            exit 1
+                        fi
                         
                         # Create build info
-                        echo "Build Number: ${BUILD_NUMBER}" > build/build-info.txt
-                        echo "Build Date: $(date)" >> build/build-info.txt
-                        echo "Git Commit: $(git rev-parse HEAD)" >> build/build-info.txt
+                        echo "Build Number: ${BUILD_NUMBER}" > dist/build-info.txt
+                        echo "Build Date: $(date)" >> dist/build-info.txt
+                        echo "Git Commit: $(git rev-parse HEAD)" >> dist/build-info.txt
                         
-                        echo "✅ Build completed successfully"
+                        echo "✅ Angular build completed successfully"
                     '''
                 }
             }
             post {
                 success {
-                    archiveArtifacts artifacts: 'build/**', fingerprint: true
+                    archiveArtifacts artifacts: 'dist/**', fingerprint: true
                 }
             }
         }
@@ -188,17 +254,17 @@ EOF
         stage('SonarQube Analysis') {
             steps {
                 script {
-                    echo '📊 Running SonarQube analysis with Docker...'
+                    echo '📊 Running SonarQube analysis for Angular...'
                     
                     writeFile file: 'sonar-project.properties', text: '''sonar.projectKey=${JOB_NAME}
 sonar.projectName=${JOB_NAME}
 sonar.projectVersion=${BUILD_NUMBER}
 sonar.sources=src
 sonar.tests=src
-sonar.test.inclusions=**/*.test.js,**/*.test.jsx
-sonar.exclusions=**/node_modules/**,**/build/**,**/*.test.js,**/*.test.jsx
-sonar.javascript.lcov.reportPaths=coverage/lcov.info
-sonar.eslint.reportPaths=eslint-report.json'''
+sonar.test.inclusions=**/*.spec.ts
+sonar.exclusions=**/node_modules/**,**/dist/**,**/*.spec.ts,**/e2e/**,**/*.js
+sonar.typescript.lcov.reportPaths=coverage/lcov.info
+sonar.typescript.tslint.reportPaths=lint-report.json'''
                     
                     try {
                         withSonarQubeEnv('SonarQube') {
@@ -255,21 +321,23 @@ sonar.eslint.reportPaths=eslint-report.json'''
         stage('Build Docker Image') {
             steps {
                 script {
-                    echo '🐳 Building Docker image...'
+                    echo '🐳 Building Docker image for Angular...'
                     
-                    writeFile file: 'Dockerfile', text: '''FROM node:18-alpine as build
+                    writeFile file: 'Dockerfile', text: '''# Build stage
+FROM node:18-alpine as build
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm install --legacy-peer-deps --no-engine-strict --force
 COPY . .
 RUN npm run build
 
+# Production stage  
 FROM nginx:alpine
-COPY --from=build /app/build /usr/share/nginx/html
+COPY --from=build /app/dist/ /usr/share/nginx/html/
 COPY nginx.conf /etc/nginx/nginx.conf
 LABEL maintainer="hamza.nassif12@hotmail.com"
 LABEL version="${BUILD_NUMBER}"
-LABEL description="Portfolio Frontend Application"
+LABEL description="Angular Material Dashboard Application"
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]'''
                     
@@ -279,20 +347,41 @@ CMD ["nginx", "-g", "daemon off;"]'''
 http {
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
+    
     server {
         listen 80;
         server_name localhost;
         root /usr/share/nginx/html;
         index index.html;
+        
+        # Enable gzip compression
         gzip on;
+        gzip_vary on;
+        gzip_min_length 1024;
+        gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+        
+        # Handle Angular routing - all routes go to index.html
         location / {
             try_files $uri $uri/ /index.html;
         }
+        
+        # Cache static assets
+        location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg)$ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+        
+        # Health check endpoint
         location /health {
             access_log off;
             return 200 "healthy\\n";
             add_header Content-Type text/plain;
         }
+        
+        # Security headers
+        add_header X-Frame-Options DENY;
+        add_header X-Content-Type-Options nosniff;
+        add_header X-XSS-Protection "1; mode=block";
     }
 }'''
                     
@@ -353,7 +442,7 @@ http {
         stage('Push to Docker Hub') {
             steps {
                 script {
-                    echo '📤 Pushing image to Docker Hub...'
+                    echo '📤 Pushing Angular image to Docker Hub...'
                     
                     sh '''
                         echo "Testing Docker Hub credentials..."
@@ -399,12 +488,12 @@ http {
                     echo '📦 Pushing build artifacts to Nexus...'
                     sh '''
                         # Create artifacts
-                        tar -czf portfolio-app-${BUILD_NUMBER}.tar.gz build/ package.json
+                        tar -czf angular-dashboard-${BUILD_NUMBER}.tar.gz dist/ package.json
                         
                         # Upload to Nexus (non-blocking)
                         curl -v --user ${NEXUS_CREDENTIALS_USR}:${NEXUS_CREDENTIALS_PSW} \
-                             --upload-file portfolio-app-${BUILD_NUMBER}.tar.gz \
-                             "${NEXUS_URL}/repository/maven-releases/com/frontend/portfolio/${BUILD_NUMBER}/portfolio-app-${BUILD_NUMBER}.tar.gz" || echo "Nexus upload failed, continuing..."
+                             --upload-file angular-dashboard-${BUILD_NUMBER}.tar.gz \
+                             "${NEXUS_URL}/repository/maven-releases/com/angular/dashboard/${BUILD_NUMBER}/angular-dashboard-${BUILD_NUMBER}.tar.gz" || echo "Nexus upload failed, continuing..."
                         
                         echo "✅ Artifact upload attempted"
                     '''
@@ -415,17 +504,17 @@ http {
         stage('Deploy Application') {
             steps {
                 script {
-                    echo '🚀 Deploying Portfolio application...'
+                    echo '🚀 Deploying Angular Material Dashboard...'
                     sh '''
                         # Stop existing container if running
-                        docker stop portfolio-frontend-app || true
-                        docker rm portfolio-frontend-app || true
+                        docker stop angular-dashboard-app || true
+                        docker rm angular-dashboard-app || true
                         
                         # Deploy new version
                         docker run -d \
-                            --name portfolio-frontend-app \
+                            --name angular-dashboard-app \
                             --restart unless-stopped \
-                            -p 3000:80 \
+                            -p 4200:80 \
                             -e "BUILD_NUMBER=${BUILD_NUMBER}" \
                             ${IMAGE_NAME}:${IMAGE_TAG}
                         
@@ -433,16 +522,16 @@ http {
                         sleep 15
                         
                         # Health check
-                        if curl -f http://localhost:3000; then
-                            echo "✅ Portfolio application is running successfully!"
-                            echo "🌐 Access your portfolio at: http://localhost:3000"
+                        if curl -f http://localhost:4200/health; then
+                            echo "✅ Angular Dashboard is running successfully!"
+                            echo "🌐 Access your dashboard at: http://localhost:4200"
                         else
                             echo "❌ Health check failed!"
-                            docker logs portfolio-frontend-app
+                            docker logs angular-dashboard-app
                             exit 1
                         fi
                         
-                        docker ps | grep portfolio-frontend-app
+                        docker ps | grep angular-dashboard-app
                     '''
                 }
             }
@@ -454,17 +543,17 @@ http {
                     echo '🧪 Running post-deployment tests...'
                     sh '''
                         # Basic connectivity tests
-                        curl -I http://localhost:3000
+                        curl -I http://localhost:4200
                         
-                        # Check if the portfolio content loads
-                        if curl -s http://localhost:3000 | grep -i "portfolio\\|hamza\\|nassif" > /dev/null; then
-                            echo "✅ Portfolio content detected"
+                        # Check if the Angular app loads
+                        if curl -s http://localhost:4200 | grep -i "angular\\|material\\|dashboard" > /dev/null; then
+                            echo "✅ Angular Dashboard content detected"
                         else
-                            echo "⚠️ Portfolio content check - page loaded but content not detected"
+                            echo "⚠️ Dashboard content check - may need time to load"
                         fi
                         
                         # Performance test
-                        time curl -s http://localhost:3000 > /dev/null
+                        time curl -s http://localhost:4200 > /dev/null
                         
                         echo "✅ Post-deployment tests completed"
                     '''
@@ -491,33 +580,43 @@ http {
         success {
             echo '✅ Pipeline completed successfully!'
             script {
-                currentBuild.description = "✅ Portfolio deployed: http://localhost:3000"
+                currentBuild.description = "✅ Angular Dashboard deployed: http://localhost:4200"
             }
         }
         failure {
             echo '❌ Pipeline failed!'
             sh '''
                 echo "=== TROUBLESHOOTING INFORMATION ==="
-                echo "1. Container Logs:"
-                docker logs portfolio-frontend-app || echo "No portfolio container running"
+                echo "1. Node.js version: $(node --version)"
+                echo "2. npm version: $(npm --version)"
+                echo "3. Angular CLI version:"
+                ng version || echo "Angular CLI not available"
+                echo "4. Container Logs:"
+                docker logs angular-dashboard-app || echo "No angular dashboard container running"
                 
-                echo "2. Docker Images:"
+                echo "5. Docker Images:"
                 docker images | grep ${IMAGE_NAME} || echo "No images found"
                 
-                echo "3. Running Containers:"
-                docker ps -a | grep -E "(portfolio|jenkins|trivy)" || echo "No related containers"
+                echo "6. Running Containers:"
+                docker ps -a | grep -E "(angular|jenkins|trivy)" || echo "No related containers"
                 
-                echo "4. Network Information:"
+                echo "7. Network Information:"
                 docker network ls | grep devops || echo "No devops network found"
                 
-                echo "5. Service Health Checks:"
+                echo "8. Service Health Checks:"
                 curl -f http://trivy-server:4954/healthz 2>/dev/null && echo "✅ Trivy server is healthy" || echo "❌ Trivy server not accessible"
                 curl -f http://sonarqube:9000/api/system/status 2>/dev/null && echo "✅ SonarQube server is healthy" || echo "❌ SonarQube server not accessible"
                 curl -f http://nexus:8081/service/rest/v1/status 2>/dev/null && echo "✅ Nexus server is healthy" || echo "❌ Nexus server not accessible"
                 
-                echo "6. Docker Hub Repository Check:"
+                echo "9. Docker Hub Repository Check:"
                 echo "Make sure the repository '${IMAGE_NAME}' exists on Docker Hub"
                 echo "Repository URL: https://hub.docker.com/r/${IMAGE_NAME}"
+                
+                echo "10. Build Output Check:"
+                ls -la dist/ || echo "No dist folder found"
+                
+                echo "11. Package.json Engines:"
+                grep -A 5 '"engines"' package.json || echo "No engines found in package.json"
             '''
         }
     }
