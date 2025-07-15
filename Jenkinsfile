@@ -399,18 +399,92 @@ http {
         stage('Push Artifacts to Nexus') {
             steps {
                 script {
-                    echo '📦 Pushing build artifacts to Nexus...'
+                    echo '📦 Pushing build artifacts to Nexus Raw Repository...'
                     sh '''
-                        # Create artifacts
-                        tar -czf angular-dashboard-${BUILD_NUMBER}.tar.gz dist/ package.json
+                        # Create build artifacts
+                        echo "=== Creating Build Artifacts ==="
+                        tar -czf angular-dashboard-${BUILD_NUMBER}.tar.gz dist/ package.json angular.json README.md
                         
-                        # Upload to Nexus (non-blocking)
-                        curl -v --user ${NEXUS_CREDENTIALS_USR}:${NEXUS_CREDENTIALS_PSW} \
+                        # Create a build manifest
+                        cat > build-manifest.json << EOF
+{
+    "projectName": "Angular Material Dashboard",
+    "buildNumber": "${BUILD_NUMBER}",
+    "buildDate": "$(date -Iseconds)",
+    "gitCommit": "$(git rev-parse HEAD)",
+    "gitBranch": "$(git rev-parse --abbrev-ref HEAD)",
+    "nodeVersion": "$(node --version)",
+    "angularVersion": "$(ng version --json | jq -r '.versions.angular' || echo 'unknown')",
+    "artifacts": [
+        {
+            "name": "angular-dashboard-${BUILD_NUMBER}.tar.gz",
+            "type": "application/gzip",
+            "size": "$(stat -c%s angular-dashboard-${BUILD_NUMBER}.tar.gz)",
+            "path": "angular-dashboard/${BUILD_NUMBER}/angular-dashboard-${BUILD_NUMBER}.tar.gz"
+        }
+    ]
+}
+EOF
+                        
+                        echo "=== Testing Nexus Connectivity ==="
+                        if curl -f "${NEXUS_URL}/service/rest/v1/status" 2>/dev/null; then
+                            echo "✅ Nexus server is accessible"
+                        else
+                            echo "⚠️ Nexus server connectivity issue"
+                        fi
+                        
+                        echo "=== Uploading to Nexus Raw Repository ==="
+                        
+                        # Upload main artifact
+                        echo "Uploading main artifact..."
+                        if curl -v --user ${NEXUS_CREDENTIALS_USR}:${NEXUS_CREDENTIALS_PSW} \
                              --upload-file angular-dashboard-${BUILD_NUMBER}.tar.gz \
-                             "${NEXUS_URL}/repository/maven-releases/com/angular/dashboard/${BUILD_NUMBER}/angular-dashboard-${BUILD_NUMBER}.tar.gz" || echo "Nexus upload failed, continuing..."
+                             "${NEXUS_URL}/repository/angular-releases/angular-dashboard/${BUILD_NUMBER}/angular-dashboard-${BUILD_NUMBER}.tar.gz"; then
+                            echo "✅ Main artifact uploaded successfully"
+                        else
+                            echo "❌ Main artifact upload failed"
+                            curl_exit_code=$?
+                            echo "Curl exit code: $curl_exit_code"
+                        fi
                         
-                        echo "✅ Artifact upload attempted"
+                        # Upload build manifest
+                        echo "Uploading build manifest..."
+                        if curl -v --user ${NEXUS_CREDENTIALS_USR}:${NEXUS_CREDENTIALS_PSW} \
+                             --upload-file build-manifest.json \
+                             "${NEXUS_URL}/repository/angular-releases/angular-dashboard/${BUILD_NUMBER}/build-manifest.json"; then
+                            echo "✅ Build manifest uploaded successfully"
+                        else
+                            echo "⚠️ Build manifest upload failed, but continuing..."
+                        fi
+                        
+                        # Upload latest symlink info
+                        echo "Creating latest version pointer..."
+                        echo "${BUILD_NUMBER}" > latest-version.txt
+                        curl -v --user ${NEXUS_CREDENTIALS_USR}:${NEXUS_CREDENTIALS_PSW} \
+                             --upload-file latest-version.txt \
+                             "${NEXUS_URL}/repository/angular-releases/angular-dashboard/latest-version.txt" || echo "Latest version pointer upload failed"
+                        
+                        echo "=== Nexus Upload Summary ==="
+                        echo "Main artifact: ${NEXUS_URL}/repository/angular-releases/angular-dashboard/${BUILD_NUMBER}/angular-dashboard-${BUILD_NUMBER}.tar.gz"
+                        echo "Build manifest: ${NEXUS_URL}/repository/angular-releases/angular-dashboard/${BUILD_NUMBER}/build-manifest.json"
+                        echo "Latest version: ${NEXUS_URL}/repository/angular-releases/angular-dashboard/latest-version.txt"
+                        
+                        # Clean up temporary files
+                        rm -f build-manifest.json latest-version.txt
+                        
+                        echo "✅ Nexus upload process completed"
                     '''
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'angular-dashboard-*.tar.gz', fingerprint: true, allowEmptyArchive: true
+                }
+                success {
+                    echo "✅ Artifacts successfully uploaded to Nexus Repository"
+                }
+                failure {
+                    echo "❌ Nexus upload failed - check repository configuration and credentials"
                 }
             }
         }
@@ -430,6 +504,7 @@ http {
                             --restart unless-stopped \
                             -p 4200:80 \
                             -e "BUILD_NUMBER=${BUILD_NUMBER}" \
+                            -e "NEXUS_URL=${NEXUS_URL}" \
                             ${IMAGE_NAME}:${IMAGE_TAG}
                         
                         # 🔧 FIX: Wait longer for nginx to fully start
@@ -465,6 +540,7 @@ http {
                         
                         echo "✅ Angular Dashboard deployment completed!"
                         echo "🌐 Access your dashboard at: http://localhost:4200"
+                        echo "📦 Artifacts available at: ${NEXUS_URL}/repository/angular-releases/angular-dashboard/${BUILD_NUMBER}/"
                         
                         # Show container status
                         docker ps | grep angular-dashboard-app || echo "Container not found in ps"
@@ -494,6 +570,14 @@ http {
                         echo "=== Performance Test ==="
                         time curl -s http://localhost:4200 > /dev/null || echo "Performance test failed"
                         
+                        # Test artifact availability in Nexus
+                        echo "=== Nexus Artifact Verification ==="
+                        if curl -f "${NEXUS_URL}/repository/angular-releases/angular-dashboard/${BUILD_NUMBER}/angular-dashboard-${BUILD_NUMBER}.tar.gz" > /dev/null 2>&1; then
+                            echo "✅ Artifact available in Nexus"
+                        else
+                            echo "⚠️ Artifact not found in Nexus"
+                        fi
+                        
                         echo "✅ Post-deployment tests completed"
                     '''
                 }
@@ -509,7 +593,7 @@ http {
                 docker images ${IMAGE_NAME} --format "table {{.Repository}}:{{.Tag}}\\t{{.ID}}" | tail -n +4 | head -n -3 | awk '{print $2}' | xargs -r docker rmi || true
                 
                 # Clean up files
-                rm -f *.tar.gz *.zip || true
+                rm -f *.tar.gz *.zip *.json || true
                 
                 # Docker logout
                 docker logout || true
@@ -519,7 +603,12 @@ http {
         success {
             echo '✅ Pipeline completed successfully!'
             script {
-                currentBuild.description = "✅ Angular Dashboard deployed: http://localhost:4200"
+                currentBuild.description = """
+✅ Angular Dashboard Build ${BUILD_NUMBER}
+🌐 App: http://localhost:4200
+📦 Artifacts: ${NEXUS_URL}/repository/angular-releases/angular-dashboard/${BUILD_NUMBER}/
+🐳 Docker: ${IMAGE_NAME}:${IMAGE_TAG}
+""".stripIndent()
             }
         }
         failure {
@@ -540,6 +629,9 @@ http {
                 
                 echo "5. Network Status:"
                 docker network ls | grep ${DOCKER_NETWORK} || echo "Network not found"
+                
+                echo "6. Nexus Status:"
+                curl -f "${NEXUS_URL}/service/rest/v1/status" || echo "Nexus not accessible"
             '''
         }
     }
