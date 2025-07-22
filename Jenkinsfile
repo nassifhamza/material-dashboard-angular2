@@ -502,7 +502,7 @@ EOF
                         docker run -d \
                             --name angular-dashboard-app \
                             --restart unless-stopped \
-                            -p 4200:80 \
+                            -p 8989:80 \
                             -e "BUILD_NUMBER=${BUILD_NUMBER}" \
                             -e "NEXUS_URL=${NEXUS_URL}" \
                             ${IMAGE_NAME}:${IMAGE_TAG}
