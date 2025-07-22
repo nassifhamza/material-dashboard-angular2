@@ -524,7 +524,7 @@ EOF
                         fi
                         
                         # Test basic nginx response first
-                        if curl -f http://localhost:4200; then
+                        if curl -f http://localhost:8989; then
                             echo "✅ Basic nginx response successful"
                         else
                             echo "⚠️ Basic nginx check failed, but container is running"
@@ -532,14 +532,14 @@ EOF
                         fi
                         
                         # Test health endpoint
-                        if curl -f http://localhost:4200/health; then
+                        if curl -f http://localhost:8989/health; then
                             echo "✅ Health endpoint is responding"
                         else
                             echo "⚠️ Health endpoint not responding, but application may still be working"
                         fi
                         
                         echo "✅ Angular Dashboard deployment completed!"
-                        echo "🌐 Access your dashboard at: http://localhost:4200"
+                        echo "🌐 Access your dashboard at: http://localhost:8989"
                         echo "📦 Artifacts available at: ${NEXUS_URL}/repository/angular-releases/angular-dashboard/${BUILD_NUMBER}/"
                         
                         # Show container status
@@ -556,19 +556,19 @@ EOF
                     sh '''
                         # Basic connectivity tests
                         echo "=== Connectivity Tests ==="
-                        curl -I http://localhost:4200 || echo "⚠️ HTTP headers check failed"
+                        curl -I http://localhost:8989 || echo "⚠️ HTTP headers check failed"
                         
                         # Check if the Angular app loads
-                        if curl -s http://localhost:4200 | grep -i "angular\\|material\\|dashboard" > /dev/null; then
+                        if curl -s http://localhost:8989 | grep -i "angular\\|material\\|dashboard" > /dev/null; then
                             echo "✅ Angular Dashboard content detected"
                         else
                             echo "⚠️ Dashboard content check - checking what's being served"
-                            curl -s http://localhost:4200 | head -20 || echo "Could not fetch content"
+                            curl -s http://localhost:8989 | head -20 || echo "Could not fetch content"
                         fi
                         
                         # Performance test
                         echo "=== Performance Test ==="
-                        time curl -s http://localhost:4200 > /dev/null || echo "Performance test failed"
+                        time curl -s http://localhost:8989 > /dev/null || echo "Performance test failed"
                         
                         # Test artifact availability in Nexus
                         echo "=== Nexus Artifact Verification ==="
@@ -605,7 +605,7 @@ EOF
             script {
                 currentBuild.description = """
 ✅ Angular Dashboard Build ${BUILD_NUMBER}
-🌐 App: http://localhost:4200
+🌐 App: http://localhost:8989
 📦 Artifacts: ${NEXUS_URL}/repository/angular-releases/angular-dashboard/${BUILD_NUMBER}/
 🐳 Docker: ${IMAGE_NAME}:${IMAGE_TAG}
 """.stripIndent()
